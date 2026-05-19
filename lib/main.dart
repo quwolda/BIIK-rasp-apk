@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:html/parser.dart' as htmlParser;
-import 'package:html/dom.dart' as dom;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:charset_converter/charset_converter.dart';
 import 'dart:convert';
@@ -13,14 +12,14 @@ void main() {
 // ─── Модель одной пары ────────────────────────────────────────────────────────
 
 class Lesson {
-  final String date;      // "20.05.2026"
-  final String weekday;   // "Ср-1"
-  final String pairNum;   // "1 Пара"
-  final String time;      // "08.30-10.00"
-  final String subject;   // "ПиТПМ"
-  final String type;      // "Лаб." / "Лек" / ""
-  final String room;      // "110"
-  final String teacher;   // "Семёнов В.А."
+  final String date; // "20.05.2026"
+  final String weekday; // "Ср-1"
+  final String pairNum; // "1 Пара"
+  final String time; // "08.30-10.00"
+  final String subject; // "ПиТПМ"
+  final String type; // "Лаб." / "Лек" / ""
+  final String room; // "110"
+  final String teacher; // "Семёнов В.А."
 
   const Lesson({
     required this.date,
@@ -106,16 +105,16 @@ List<Lesson> parseSchedule(String html) {
 
       // Пара — это "1 Пара", "2 Пара" и т.д.
       final pairPattern = RegExp(r'(\d)\s*[Пп]ара');
-      if (!pairPattern.hasMatch(pairText) && !RegExp(r'^\d$').hasMatch(pairText)) {
+      if (!pairPattern.hasMatch(pairText) &&
+          !RegExp(r'^\d$').hasMatch(pairText)) {
         // Не похоже на номер пары — пропускаем строку
         // (заголовки таблицы и т.п.)
         continue;
       }
 
       final pairMatch = pairPattern.firstMatch(pairText);
-      final pairNum = pairMatch != null
-          ? '${pairMatch.group(1)} Пара'
-          : '$pairText Пара';
+      final pairNum =
+          pairMatch != null ? '${pairMatch.group(1)} Пара' : '$pairText Пара';
 
       cellIndex++;
 
@@ -283,8 +282,7 @@ class _RaspPageState extends State<RaspPage> {
     final prefs = await SharedPreferences.getInstance();
     final saved = prefs.getStringList('schedule_v2');
     if (saved != null && saved.isNotEmpty) {
-      final lessons =
-          saved.map((s) => Lesson.fromJson(jsonDecode(s))).toList();
+      final lessons = saved.map((s) => Lesson.fromJson(jsonDecode(s))).toList();
       setState(() {
         _lessons = lessons;
         _status = 'Загружено из кэша';
@@ -389,13 +387,12 @@ class _RaspPageState extends State<RaspPage> {
           children: [
             // Заголовок дня
             Padding(
-              padding:
-                  const EdgeInsets.fromLTRB(16, 8, 16, 4),
+              padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
               child: Row(
                 children: [
                   Container(
-                    padding: const EdgeInsets.symmetric(
-                        horizontal: 12, vertical: 4),
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
                     decoration: BoxDecoration(
                       color: const Color(0xFF1565C0),
                       borderRadius: BorderRadius.circular(20),
@@ -519,8 +516,8 @@ class _LessonCard extends StatelessWidget {
                             decoration: BoxDecoration(
                               color: typeColor.withOpacity(0.1),
                               borderRadius: BorderRadius.circular(4),
-                              border: Border.all(
-                                  color: typeColor.withOpacity(0.4)),
+                              border:
+                                  Border.all(color: typeColor.withOpacity(0.4)),
                             ),
                             child: Text(
                               lesson.type,
