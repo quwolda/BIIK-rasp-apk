@@ -9,19 +9,29 @@ import 'package:html/parser.dart' as htmlParser;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:charset_converter/charset_converter.dart';
 import '../models/models.dart';
+import 'dart:async';
+import 'dart:typed_data';
 
 const _base = 'https://biik.ru/rasp/';
 
 class ScheduleService {
   // ── Сеть ────────────────────────────────────────────────────────────────────
 
-  Future<String> _get(String url) async {
+  Future<Uint8List> _getBytes(String url) async {
     print('=== GET $url ===');
-    final response = await http.get(Uri.parse(url));
+    final response = await http.get(
+      Uri.parse(url),
+      headers: {'User-Agent': 'Mozilla/5.0 (Android 14)'},
+    ).timeout(const Duration(seconds: 15));
     print('=== response: ${response.statusCode} ===');
     if (response.statusCode != 200)
       throw Exception('HTTP ${response.statusCode}');
-    return CharsetConverter.decode('windows-1251', response.bodyBytes);
+    return response.bodyBytes;
+  }
+
+  Future<String> _get(String url) async {
+    final bytes = await _getBytes(url);
+    return CharsetConverter.decode('windows-1251', bytes);
   }
 
   /// Список всех групп с cg.htm
