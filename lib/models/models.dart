@@ -3,9 +3,9 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 class Group {
-  final String id;    // числовой ID из URL (e.g. "82")
-  final String name;  // отображаемое имя (e.g. "ЦС-82")
-  final String url;   // файл (e.g. "cg82.htm")
+  final String id; // числовой ID из URL (e.g. "82")
+  final String name; // отображаемое имя (e.g. "ЦС-82")
+  final String url; // файл (e.g. "cg82.htm")
 
   const Group({required this.id, required this.name, required this.url});
 
@@ -27,15 +27,15 @@ class Group {
 // ─────────────────────────────────────────────────────────────────────────────
 
 class Lesson {
-  final String date;      // "20.05.2026"
-  final String weekday;   // "Ср-1"
-  final String pairNum;   // "1"
-  final String time;      // "08.30-10.00"
-  final String subject;   // "ПиТПМ"
-  final String type;      // "Лаб." / "Лек" / ""
-  final String room;      // "110"
-  final String teacher;   // "Семёнов В.А."
-  final int subgroup;     // 0=все, 1=первая, 2=вторая
+  final String date; // "20.05.2026"
+  final String weekday; // "Ср-1"
+  final String pairNum; // "1"
+  final String time; // "08.30-10.00"
+  final String subject; // "ПиТПМ"
+  final String type; // "Лаб." / "Лек" / ""
+  final String room; // "110"
+  final String teacher; // "Семёнов В.А."
+  final int subgroup; // 0=все, 1=первая, 2=вторая
 
   const Lesson({
     required this.date,
@@ -53,7 +53,8 @@ class Lesson {
   String get key => '$date-$pairNum-$subgroup';
 
   /// Подходит ли пара для указанной подгруппы
-  bool matches(int userSubgroup) => subgroup == 0 || subgroup == userSubgroup;
+  bool matches(int userSubgroup) =>
+      userSubgroup == 0 || subgroup == 0 || subgroup == userSubgroup;
 
   Map<String, dynamic> toJson() => {
         'date': date,
@@ -126,8 +127,9 @@ class ScheduleSnapshot {
 class LessonChange {
   final String date;
   final String pairNum;
-  final String subject;   // для контекста
-  final String field;     // 'added' | 'removed' | 'subject' | 'room' | 'teacher' | 'time' | 'type'
+  final String subject; // для контекста
+  final String
+      field; // 'added' | 'removed' | 'subject' | 'room' | 'teacher' | 'time' | 'type'
   final String oldValue;
   final String newValue;
   final DateTime detectedAt;

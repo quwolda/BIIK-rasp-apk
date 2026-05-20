@@ -1,6 +1,5 @@
 // ─────────────────────────────────────────────────────────────────────────────
 // screens/schedule_screen.dart
-// Главный экран: расписание + история (свайп вверх) + FAB обновления
 // ─────────────────────────────────────────────────────────────────────────────
 
 import 'package:flutter/material.dart';
@@ -29,25 +28,14 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
   int _changeCount = 0;
 
   bool _loading = false;
-  bool _loadingMore = false;
   String _status = '';
 
-  // Текущий просматриваемый снимок (null = актуальное)
   ScheduleSnapshot? _viewingSnapshot;
-
-  final _scrollController = ScrollController();
 
   @override
   void initState() {
     super.initState();
-    _scrollController.addListener(_onScroll);
     _init();
-  }
-
-  @override
-  void dispose() {
-    _scrollController.dispose();
-    super.dispose();
   }
 
   // ── Инициализация ──────────────────────────────────────────────────────────
@@ -57,7 +45,6 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
     _subgroup = await _svc.getSubgroup();
 
     if (_group == null) {
-      // Первый запуск — показываем выбор группы
       if (mounted) {
         final selected = await Navigator.push<Group>(
           context,
@@ -112,18 +99,19 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
         lessons: fresh,
       );
 
-      // Детектируем изменения относительно базовой линии дня
-      final baseline = await _svc.loadTodaysBaseline(_group!.id);
-      if (baseline != null) {
-        final changes = _svc.detectChanges(baseline.lessons, fresh);
-        if (changes.isNotEmpty) await _svc.saveChanges(_group!.id, changes);
+      // Базовая линия — только первый раз за день
+      final savedNew =
+          await _svc.saveTodaysBaselineIfAbsent(_group!.id, freshSnap);
+
+      // Изменения — только если базовая линия уже была
+      if (!savedNew) {
+        final baseline = await _svc.loadTodaysBaseline(_group!.id);
+        if (baseline != null) {
+          final changes = _svc.detectChanges(baseline.lessons, fresh);
+          if (changes.isNotEmpty) await _svc.saveChanges(_group!.id, changes);
+        }
       }
 
-      // Сохраняем базовую линию (если её ещё нет на сегодня — первое получение)
-      if (baseline == null)
-        await _svc.saveTodaysBaseline(_group!.id, freshSnap);
-
-      // В историю — только если снимка за этот день ещё нет
       await _svc.addToHistory(_group!.id, freshSnap);
 
       final allChanges = await _svc.loadChanges(_group!.id);
@@ -143,64 +131,6 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
     }
   }
 
-  // ── Скролл вверх — подгрузка архива ──────────────────────────────────────
-
-  void _onScroll() {
-    if (_scrollController.position.pixels <= -80 && !_loadingMore) {
-      _loadOlderWeek();
-    }
-  }
-
-  Future<void> _loadOlderWeek() async {
-    if (_group == null || _loadingMore) return;
-    setState(() => _loadingMore = true);
-
-    try {
-      final archiveUrls = await _svc.fetchArchiveUrls(_group!.id);
-      final loaded = _history.map((s) => s.dateKey).toSet();
-
-      String? nextUrl;
-      for (final url in archiveUrls.reversed) {
-        // Пробуем найти URL которого ещё нет
-        final testSnap = ScheduleSnapshot(
-          groupId: _group!.id,
-          fetchedAt: DateTime.now().subtract(const Duration(days: 7)),
-          lessons: [],
-        );
-        if (!loaded.contains(testSnap.dateKey)) {
-          nextUrl = url;
-          break;
-        }
-      }
-      nextUrl ??= archiveUrls.isNotEmpty ? archiveUrls.last : null;
-
-      if (nextUrl == null) {
-        _showSnack('Начало учебного года — данных больше нет');
-        return;
-      }
-
-      final old = await _svc.fetchArchiveSchedule(nextUrl);
-      if (old.isEmpty) {
-        _showSnack('Начало учебного года — расписание не найдено');
-        return;
-      }
-
-      final snap = ScheduleSnapshot(
-        groupId: _group!.id,
-        fetchedAt: DateTime.now().subtract(const Duration(days: 7)),
-        lessons: old,
-      );
-      await _svc.addToHistory(_group!.id, snap);
-      final history = await _svc.loadHistory(_group!.id);
-      setState(() => _history = history);
-      _showSnack('Загружено: ${snap.weekLabel}');
-    } catch (e) {
-      _showSnack('Не удалось загрузить архив: $e');
-    } finally {
-      setState(() => _loadingMore = false);
-    }
-  }
-
   // ── Вспомогательные ───────────────────────────────────────────────────────
 
   String _fmtDt(DateTime dt) =>
@@ -217,7 +147,7 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
     return src.where((l) => l.matches(_subgroup)).toList();
   }
 
-  // ── UI ─────────────────────────────────────────────────────────────────────
+  // ── UI ────────────────────────────────────────────────────────────────────
 
   @override
   Widget build(BuildContext context) {
@@ -258,7 +188,6 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
         ],
       ),
       actions: [
-        // Кнопка изменений
         if (_changeCount > 0)
           Stack(
             alignment: Alignment.topRight,
@@ -356,85 +285,65 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
     final lessons = _activeLessons;
     if (lessons.isEmpty && !_loading) return _buildEmpty();
 
-    // Группируем по дате
     final Map<String, List<Lesson>> byDate = {};
     for (final l in lessons) {
       byDate.putIfAbsent(l.date, () => []).add(l);
     }
     final dates = byDate.keys.toList();
 
-    return RefreshIndicator(
-      onRefresh: _refresh,
-      child: CustomScrollView(
-        controller: _scrollController,
-        physics: const AlwaysScrollableScrollPhysics(),
-        slivers: [
-          // Подсказка «потяните вверх для архива»
+    return CustomScrollView(
+      physics: const ClampingScrollPhysics(),
+      slivers: [
+        // История снимков
+        if (_history.isNotEmpty)
+          SliverToBoxAdapter(child: _buildHistoryChips()),
+
+        // Кнопка «вернуться к текущему»
+        if (_viewingSnapshot != null)
           SliverToBoxAdapter(
-            child: _loadingMore
-                ? const Padding(
-                    padding: EdgeInsets.all(12),
-                    child: Center(child: CircularProgressIndicator()))
-                : const Padding(
-                    padding: EdgeInsets.symmetric(vertical: 8),
-                    child: Center(
-                      child: Text('↑ Потяните для загрузки прошлой недели',
-                          style: TextStyle(color: Colors.grey, fontSize: 12)),
-                    ),
-                  ),
-          ),
-
-          // История (свёрнутые снимки)
-          if (_history.isNotEmpty && _viewingSnapshot == null)
-            SliverToBoxAdapter(child: _buildHistoryChips()),
-
-          // Просматриваемый снимок — кнопка «вернуться»
-          if (_viewingSnapshot != null)
-            SliverToBoxAdapter(
-              child: Padding(
-                padding: const EdgeInsets.fromLTRB(12, 4, 12, 0),
-                child: TextButton.icon(
-                  icon: const Icon(Icons.arrow_back),
-                  label: const Text('Вернуться к текущему'),
-                  onPressed: () => setState(() => _viewingSnapshot = null),
-                ),
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(12, 4, 12, 0),
+              child: TextButton.icon(
+                icon: const Icon(Icons.arrow_back),
+                label: const Text('Вернуться к текущему'),
+                onPressed: () => setState(() => _viewingSnapshot = null),
               ),
             ),
-
-          // Расписание
-          SliverList(
-            delegate: SliverChildBuilderDelegate(
-              (ctx, i) {
-                final date = dates[i];
-                final dayLessons = byDate[date]!;
-                return Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    DayHeader(date: date, weekday: dayLessons.first.weekday),
-                    ...dayLessons.map((l) => LessonCard(lesson: l)),
-                    const SizedBox(height: 4),
-                  ],
-                );
-              },
-              childCount: dates.length,
-            ),
           ),
-          const SliverToBoxAdapter(child: SizedBox(height: 80)),
-        ],
-      ),
+
+        // Расписание
+        SliverList(
+          delegate: SliverChildBuilderDelegate(
+            (ctx, i) {
+              final date = dates[i];
+              final dayLessons = byDate[date]!;
+              return Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  DayHeader(date: date, weekday: dayLessons.first.weekday),
+                  ...dayLessons.map((l) => LessonCard(lesson: l)),
+                  const SizedBox(height: 4),
+                ],
+              );
+            },
+            childCount: dates.length,
+          ),
+        ),
+        const SliverToBoxAdapter(child: SizedBox(height: 80)),
+      ],
     );
   }
 
   Widget _buildHistoryChips() {
     return SizedBox(
-      height: 36,
+      height: 40,
       child: ListView.separated(
         scrollDirection: Axis.horizontal,
-        padding: const EdgeInsets.symmetric(horizontal: 12),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
         itemCount: _history.length,
         separatorBuilder: (_, __) => const SizedBox(width: 6),
         itemBuilder: (_, i) {
-          final snap = _history[_history.length - 1 - i]; // новые первыми
+          final snap = _history[_history.length - 1 - i];
           final selected = _viewingSnapshot?.dateKey == snap.dateKey;
           return FilterChip(
             label: Text(snap.weekLabel,
@@ -468,7 +377,7 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
     );
   }
 
-  // ── Боковое меню ───────────────────────────────────────────────────────────
+  // ── Боковое меню ──────────────────────────────────────────────────────────
 
   Widget _buildDrawer() {
     return Drawer(
@@ -533,7 +442,7 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
     );
   }
 
-  // ── Навигация ──────────────────────────────────────────────────────────────
+  // ── Навигация ─────────────────────────────────────────────────────────────
 
   Future<void> _openSettings() async {
     final result = await Navigator.push<Map<String, dynamic>>(

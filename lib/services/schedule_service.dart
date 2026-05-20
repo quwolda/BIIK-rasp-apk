@@ -1,29 +1,23 @@
 // ─────────────────────────────────────────────────────────────────────────────
 // services/schedule_service.dart
-// Сетевые запросы, парсинг HTML, хранение, настройки, детектирование изменений
 // ─────────────────────────────────────────────────────────────────────────────
 
 import 'dart:convert';
+import 'dart:typed_data';
 import 'package:http/http.dart' as http;
 import 'package:html/parser.dart' as htmlParser;
+import 'package:html/dom.dart' as dom;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:charset_converter/charset_converter.dart';
 import '../models/models.dart';
-import 'dart:async';
-import 'dart:typed_data';
 
 const _base = 'https://biik.ru/rasp/';
 
 class ScheduleService {
-  // ── Сеть ────────────────────────────────────────────────────────────────────
+  // ── Сеть ──────────────────────────────────────────────────────────────────
 
   Future<Uint8List> _getBytes(String url) async {
-    print('=== GET $url ===');
-    final response = await http.get(
-      Uri.parse(url),
-      headers: {'User-Agent': 'Mozilla/5.0 (Android 14)'},
-    ).timeout(const Duration(seconds: 15));
-    print('=== response: ${response.statusCode} ===');
+    final response = await http.get(Uri.parse(url));
     if (response.statusCode != 200)
       throw Exception('HTTP ${response.statusCode}');
     return response.bodyBytes;
@@ -34,17 +28,14 @@ class ScheduleService {
     return CharsetConverter.decode('windows-1251', bytes);
   }
 
-  /// Список всех групп с cg.htm
+  // ── Группы ────────────────────────────────────────────────────────────────
+
   Future<List<Group>> fetchGroups() async {
-    print('=== fetchGroups: start ===');
     final html = await _get('${_base}cg.htm');
-    print('=== fetchGroups: got html, length=${html.length} ===');
     final doc = htmlParser.parse(html);
     final groups = <Group>[];
-
     for (final a in doc.querySelectorAll('a[href]')) {
       final href = (a.attributes['href'] ?? '').trim();
-      // Ссылки вида cg82.htm
       if (!RegExp(r'^cg\d+\.htm$', caseSensitive: false).hasMatch(href))
         continue;
       final id = href.replaceAll(RegExp(r'[^0-9]'), '');
@@ -55,33 +46,32 @@ class ScheduleService {
     return groups;
   }
 
-  /// Расписание конкретной группы (текущее)
   Future<List<Lesson>> fetchSchedule(String groupUrl) async {
     final html = await _get('$_base$groupUrl');
     return _parseHtml(html);
   }
 
-  /// Ссылки на архивные расписания группы с vg.htm
+  // ── Архив ─────────────────────────────────────────────────────────────────
+  // URL архива строится как vgNN.htm где NN — id группы
+
   Future<List<String>> fetchArchiveUrls(String groupId) async {
+    // Прямой URL архива группы
+    final directUrl = 'vg$groupId.htm';
     try {
-      final html = await _get('${_base}vg.htm');
+      final html = await _get('$_base$directUrl');
+      // Парсим ссылки на конкретные недели внутри архива
       final doc = htmlParser.parse(html);
       final urls = <String>[];
       for (final a in doc.querySelectorAll('a[href]')) {
         final href = (a.attributes['href'] ?? '').trim();
-        if (href.contains('vg$groupId') || href.contains('vg_$groupId')) {
+        // Ссылки вида vgNN_1.htm, vgNN_2.htm и т.д.
+        if (RegExp(r'^vg\d+.*\.htm$', caseSensitive: false).hasMatch(href)) {
           urls.add(href);
         }
       }
-      // Также проверяем общий паттерн vgNNNN.htm
-      for (final a in doc.querySelectorAll('a[href]')) {
-        final href = (a.attributes['href'] ?? '').trim();
-        if (RegExp(r'^vg\d+.*\.htm$', caseSensitive: false).hasMatch(href) &&
-            !urls.contains(href)) {
-          urls.add(href);
-        }
-      }
-      return urls;
+      // Если внутри нет подссылок — сам файл и есть архив
+      if (urls.isEmpty) urls.add(directUrl);
+      return urls.reversed.toList(); // новые первыми
     } catch (_) {
       return [];
     }
@@ -92,7 +82,10 @@ class ScheduleService {
     return _parseHtml(html);
   }
 
-  // ── Парсер ──────────────────────────────────────────────────────────────────
+  // ── Парсер ────────────────────────────────────────────────────────────────
+  // Структура таблицы:
+  // TR > TD(дата, rowspan) | TD(пара+время) | TD(colspan=2, вся группа)
+  //                                         | TD(colspan=1) TD(colspan=1) — подгруппы
 
   List<Lesson> _parseHtml(String html) {
     final doc = htmlParser.parse(html);
@@ -110,108 +103,120 @@ class ScheduleService {
         if (cells.isEmpty) continue;
 
         int ci = 0;
-        final first = _clean(cells[0].text);
 
-        // Ячейка с датой (содержит ДД.ММ.ГГГГ)
+        // Ячейка с датой (rowspan, содержит ДД.ММ.ГГГГ)
         final datePat = RegExp(r'\d{2}\.\d{2}\.\d{4}');
-        if (datePat.hasMatch(first)) {
-          currentDate = datePat.firstMatch(first)!.group(0)!;
-          currentWeekday = first.replaceAll(currentDate, '').trim();
+        final firstText = _clean(cells[0].text);
+        if (datePat.hasMatch(firstText)) {
+          currentDate = datePat.firstMatch(firstText)!.group(0)!;
+          currentWeekday = firstText
+              .replaceAll(currentDate, '')
+              .replaceAll('<br>', '')
+              .trim();
           ci = 1;
         }
 
         if (currentDate.isEmpty || cells.length <= ci) continue;
 
-        // Номер пары
+        // Ячейка с номером пары и временем
         final pairText = _clean(cells[ci].text);
         final pairMatch = RegExp(r'(\d)\s*[Пп]ара').firstMatch(pairText);
-        final isNumeric = RegExp(r'^\d$').hasMatch(pairText);
-        if (pairMatch == null && !isNumeric) continue;
+        final isNumOnly = RegExp(r'^\d$').hasMatch(pairText);
+        if (pairMatch == null && !isNumOnly) continue;
+
+        // Пустые пары (class=nul)
+        final isEmptyRow = row.querySelectorAll('td.nul').isNotEmpty ||
+            cells.any((c) => (c.attributes['class'] ?? '').contains('nul'));
+        if (isEmptyRow) continue;
 
         final pairNum = pairMatch?.group(1) ?? pairText;
+
+        // Время из той же ячейки
+        String time = '';
+        final timeMatch = RegExp(r'(\d{2}[\.\:]\d{2})-(\d{2}[\.\:]\d{2})')
+            .firstMatch(pairText);
+        if (timeMatch != null) {
+          time = '${timeMatch.group(1)}-${timeMatch.group(2)}';
+        }
         ci++;
 
-        // Время
-        String time = '';
-        if (cells.length > ci) {
-          final t = _clean(cells[ci].text);
-          if (RegExp(r'\d+[\.\:]\d+').hasMatch(t)) {
-            time = t;
-            ci++;
+        if (cells.length <= ci) continue;
+
+        // Определяем подгруппы по colspan оставшихся ячеек
+        final subjectCells = cells.sublist(ci);
+        if (subjectCells.isEmpty) continue;
+
+        final colspan0 =
+            int.tryParse(subjectCells[0].attributes['colspan'] ?? '2') ?? 2;
+
+        if (colspan0 == 2 || subjectCells.length == 1) {
+          // Вся группа (подгруппа 0)
+          final lesson = _parseSubjectCell(
+              subjectCells[0], currentDate, currentWeekday, pairNum, time, 0);
+          if (lesson != null) lessons.add(lesson);
+        } else {
+          // Две подгруппы рядом
+          if (subjectCells.isNotEmpty) {
+            final l1 = _parseSubjectCell(
+                subjectCells[0], currentDate, currentWeekday, pairNum, time, 1);
+            if (l1 != null) lessons.add(l1);
+          }
+          if (subjectCells.length > 1) {
+            final l2 = _parseSubjectCell(
+                subjectCells[1], currentDate, currentWeekday, pairNum, time, 2);
+            if (l2 != null) lessons.add(l2);
           }
         }
-
-        // Предмет + аудитория + подгруппа
-        String subject = '', type = '', room = '';
-        int subgroup = 0;
-        if (cells.length > ci) {
-          final p = _parseSubjectCell(_clean(cells[ci].text));
-          subject = p['subject']!;
-          type = p['type']!;
-          room = p['room']!;
-          subgroup = int.tryParse(p['subgroup']!) ?? 0;
-          ci++;
-        }
-
-        // Преподаватель
-        String teacher = '';
-        if (cells.length > ci) teacher = _clean(cells[ci].text);
-
-        if (subject.isEmpty) continue;
-
-        lessons.add(Lesson(
-          date: currentDate,
-          weekday: currentWeekday,
-          pairNum: pairNum,
-          time: time,
-          subject: subject,
-          type: type,
-          room: room,
-          teacher: teacher,
-          subgroup: subgroup,
-        ));
       }
     }
     return lessons;
   }
 
-  String _clean(String s) => s.replaceAll(RegExp(r'\s+'), ' ').trim();
+  Lesson? _parseSubjectCell(dom.Element cell, String date, String weekday,
+      String pairNum, String time, int subgroup) {
+    // Пропускаем пустые ячейки
+    final text = _clean(cell.text);
+    if (text.isEmpty || text == '\u00a0' || text == '&nbsp;') return null;
+    if ((cell.attributes['class'] ?? '').contains('nul')) return null;
 
-  Map<String, String> _parseSubjectCell(String raw) {
-    String subject = raw;
-    String type = '', room = '', subgroup = '0';
+    // Предмет — первая ссылка z1
+    final subjectLink = cell.querySelector('a.z1');
+    String subject = subjectLink != null ? _clean(subjectLink.text) : text;
 
-    // Подгруппа: "1 п/г", "2 п/г", "1 п.", "2 подгр."
-    final sgMatch =
-        RegExp(r'([12])\s*(?:п/г|п\.г\.|подгр\.?|п\.)').firstMatch(raw);
-    if (sgMatch != null) {
-      subgroup = sgMatch.group(1)!;
-      subject = subject.replaceFirst(sgMatch.group(0)!, '').trim();
-    }
-
-    // Тип занятия: (Лек), (Лаб.), (Пр.) …
+    // Тип занятия из скобок в названии: "(Лаб.)", "(Лек)", "(Практич.)"
+    String type = '';
     final typeMatch = RegExp(r'\(([^)]+)\)').firstMatch(subject);
     if (typeMatch != null) {
       type = typeMatch.group(1)!;
       subject = subject.substring(0, typeMatch.start).trim();
     }
 
-    // Аудитория: 3-4 цифры (возможно с буквой)
-    final roomMatch = RegExp(r'\b(\d{3,4}[а-яА-Яa-zA-Z]?)\b').firstMatch(raw);
-    if (roomMatch != null) {
-      room = roomMatch.group(1)!;
-      subject = subject.replaceFirst(room, '').trim();
-    }
+    // Аудитория — ссылка z2
+    final roomLink = cell.querySelector('a.z2');
+    final room = roomLink != null ? _clean(roomLink.text) : '';
 
-    return {
-      'subject': subject,
-      'type': type,
-      'room': room,
-      'subgroup': subgroup
-    };
+    // Преподаватель — ссылка z3
+    final teacherLink = cell.querySelector('a.z3');
+    final teacher = teacherLink != null ? _clean(teacherLink.text) : '';
+
+    if (subject.isEmpty) return null;
+
+    return Lesson(
+      date: date,
+      weekday: weekday,
+      pairNum: pairNum,
+      time: time,
+      subject: subject,
+      type: type,
+      room: room,
+      teacher: teacher,
+      subgroup: subgroup,
+    );
   }
 
-  // ── SharedPreferences helper ─────────────────────────────────────────────
+  String _clean(String s) => s.replaceAll(RegExp(r'\s+'), ' ').trim();
+
+  // ── SharedPreferences ─────────────────────────────────────────────────────
 
   Future<SharedPreferences> get _p => SharedPreferences.getInstance();
 
@@ -220,7 +225,7 @@ class ScheduleService {
     return '${n.year}-${n.month.toString().padLeft(2, '0')}-${n.day.toString().padLeft(2, '0')}';
   }
 
-  // ── Базовый снимок (сохраняется раз в день) ──────────────────────────────
+  // ── Базовая линия дня (фиксируется один раз, не перезаписывается) ─────────
 
   Future<ScheduleSnapshot?> loadTodaysBaseline(String groupId) async {
     final raw = (await _p).getString('baseline_${groupId}_${_todayKey()}');
@@ -232,14 +237,17 @@ class ScheduleService {
     }
   }
 
-  Future<void> saveTodaysBaseline(String groupId, ScheduleSnapshot snap) async {
-    await (await _p).setString(
-      'baseline_${groupId}_${_todayKey()}',
-      jsonEncode(snap.toJson()),
-    );
+  /// Сохраняет базовую линию ТОЛЬКО если её ещё нет на сегодня
+  Future<bool> saveTodaysBaselineIfAbsent(
+      String groupId, ScheduleSnapshot snap) async {
+    final prefs = await _p;
+    final key = 'baseline_${groupId}_${_todayKey()}';
+    if (prefs.containsKey(key)) return false; // уже есть — не перезаписываем
+    await prefs.setString(key, jsonEncode(snap.toJson()));
+    return true;
   }
 
-  // ── История снимков ──────────────────────────────────────────────────────
+  // ── История снимков ───────────────────────────────────────────────────────
 
   Future<List<ScheduleSnapshot>> loadHistory(String groupId) async {
     final raw = (await _p).getStringList('history_$groupId') ?? [];
@@ -255,12 +263,10 @@ class ScheduleService {
         .toList();
   }
 
-  /// Добавляет снимок в историю, избегая дубликатов по dateKey
   Future<void> addToHistory(String groupId, ScheduleSnapshot snap) async {
     final prefs = await _p;
     final history = await loadHistory(groupId);
     if (history.any((h) => h.dateKey == snap.dateKey)) return; // дубликат
-
     history.add(snap);
     final trimmed =
         history.length > 60 ? history.sublist(history.length - 60) : history;
@@ -270,15 +276,24 @@ class ScheduleService {
     );
   }
 
-  // ── Детектирование изменений ─────────────────────────────────────────────
+  // ── Изменения — без дубликатов ────────────────────────────────────────────
 
   List<LessonChange> detectChanges(List<Lesson> baseline, List<Lesson> fresh) {
     final changes = <LessonChange>[];
     final now = DateTime.now();
-    final baseMap = {for (final l in baseline) l.key: l};
-    final freshMap = {for (final l in fresh) l.key: l};
 
-    void chk(Lesson base, Lesson? f) {
+    // Ключ: дата + пара + подгруппа + предмет (чтобы не дублировать)
+    String lessonSig(Lesson l) => '${l.date}-${l.pairNum}-${l.subgroup}';
+
+    final baseMap = <String, Lesson>{};
+    for (final l in baseline) baseMap[lessonSig(l)] = l;
+
+    final freshMap = <String, Lesson>{};
+    for (final l in fresh) freshMap[lessonSig(l)] = l;
+
+    for (final key in baseMap.keys) {
+      final base = baseMap[key]!;
+      final f = freshMap[key];
       if (f == null) {
         changes.add(LessonChange(
           date: base.date,
@@ -290,10 +305,10 @@ class ScheduleService {
           newValue: '—',
           detectedAt: now,
         ));
-        return;
+        continue;
       }
       void diff(String field, String o, String n) {
-        if (o != n && n.isNotEmpty) {
+        if (o != n)
           changes.add(LessonChange(
             date: base.date,
             pairNum: base.pairNum,
@@ -303,7 +318,6 @@ class ScheduleService {
             newValue: n,
             detectedAt: now,
           ));
-        }
       }
 
       diff('subject', base.subject, f.subject);
@@ -312,8 +326,6 @@ class ScheduleService {
       diff('teacher', base.teacher, f.teacher);
       diff('time', base.time, f.time);
     }
-
-    for (final key in baseMap.keys) chk(baseMap[key]!, freshMap[key]);
 
     for (final key in freshMap.keys) {
       if (!baseMap.containsKey(key)) {
@@ -347,12 +359,22 @@ class ScheduleService {
         .toList();
   }
 
+  /// Сохраняет только новые изменения которых ещё нет в истории
   Future<void> saveChanges(
       String groupId, List<LessonChange> newChanges) async {
     if (newChanges.isEmpty) return;
     final prefs = await _p;
     final existing = await loadChanges(groupId);
-    final all = [...existing, ...newChanges];
+
+    // Дедупликация по дата+пара+поле+старое значение
+    String changeSig(LessonChange c) =>
+        '${c.date}-${c.pairNum}-${c.field}-${c.oldValue}';
+    final existingSigs = existing.map(changeSig).toSet();
+    final toAdd =
+        newChanges.where((c) => !existingSigs.contains(changeSig(c))).toList();
+    if (toAdd.isEmpty) return;
+
+    final all = [...existing, ...toAdd];
     final trimmed = all.length > 200 ? all.sublist(all.length - 200) : all;
     await prefs.setStringList(
       'changes_$groupId',
@@ -363,7 +385,7 @@ class ScheduleService {
   Future<void> clearChanges(String groupId) async =>
       (await _p).remove('changes_$groupId');
 
-  // ── Настройки ────────────────────────────────────────────────────────────
+  // ── Настройки ─────────────────────────────────────────────────────────────
 
   Future<Group?> getSelectedGroup() async {
     final raw = (await _p).getString('selected_group');
@@ -382,7 +404,7 @@ class ScheduleService {
 
   Future<void> setSubgroup(int v) async => (await _p).setInt('subgroup', v);
 
-  // ── Избранное ────────────────────────────────────────────────────────────
+  // ── Избранное ─────────────────────────────────────────────────────────────
 
   Future<List<Group>> getFavorites() async {
     final raw = (await _p).getStringList('favorites') ?? [];
@@ -415,7 +437,7 @@ class ScheduleService {
         'favorites', favs.map((f) => jsonEncode(f.toJson())).toList());
   }
 
-  // ── Кэш списка групп ────────────────────────────────────────────────────
+  // ── Кэш групп ─────────────────────────────────────────────────────────────
 
   Future<List<Group>> getCachedGroups() async {
     final raw = (await _p).getStringList('cached_groups') ?? [];
