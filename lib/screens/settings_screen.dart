@@ -29,7 +29,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Future<void> _load() async {
     final g = await _svc.getSelectedGroup();
     final s = await _svc.getSubgroup();
-    setState(() { _group = g; _subgroup = s; });
+    setState(() {
+      _group = g;
+      _subgroup = s;
+    });
   }
 
   Future<void> _pickGroup() async {
@@ -39,13 +42,19 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
     if (selected != null) {
       await _svc.setSelectedGroup(selected);
-      setState(() { _group = selected; _changed = true; });
+      setState(() {
+        _group = selected;
+        _changed = true;
+      });
     }
   }
 
   Future<void> _setSubgroup(int v) async {
     await _svc.setSubgroup(v);
-    setState(() { _subgroup = v; _changed = true; });
+    setState(() {
+      _subgroup = v;
+      _changed = true;
+    });
   }
 
   @override
@@ -62,31 +71,33 @@ class _SettingsScreenState extends State<SettingsScreen> {
         appBar: AppBar(
           backgroundColor: const Color(0xFF1565C0),
           foregroundColor: Colors.white,
-          title: const Text('Настройки', style: TextStyle(fontWeight: FontWeight.bold)),
+          title: const Text('Настройки',
+              style: TextStyle(fontWeight: FontWeight.bold)),
           actions: [
             if (_changed)
               TextButton(
-                onPressed: () => Navigator.pop(context,
-                    {'group': _group, 'subgroup': _subgroup}),
-                child: const Text('Готово', style: TextStyle(color: Colors.white)),
+                onPressed: () => Navigator.pop(
+                    context, {'group': _group, 'subgroup': _subgroup}),
+                child:
+                    const Text('Готово', style: TextStyle(color: Colors.white)),
               ),
           ],
         ),
         body: ListView(
           padding: const EdgeInsets.all(16),
           children: [
-            _SectionHeader(title: 'Основное'),
+            const _SectionHeader(title: 'Основное'),
             _SettingCard(
               icon: Icons.group,
               title: 'Моя группа',
               subtitle: _group?.name ?? 'Не выбрана',
               onTap: _pickGroup,
             ),
-
             const SizedBox(height: 16),
-            _SectionHeader(title: 'Подгруппа'),
+            const _SectionHeader(title: 'Подгруппа'),
             Card(
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12)),
               child: Padding(
                 padding: const EdgeInsets.all(12),
                 child: Column(
@@ -97,7 +108,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     const SizedBox(height: 8),
                     Row(
                       children: [
-                        _sgBtn('Все пары',  0),
+                        _sgBtn('Все пары', 0),
                         const SizedBox(width: 8),
                         _sgBtn('1 подгруппа', 1),
                         const SizedBox(width: 8),
@@ -109,16 +120,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       _subgroup == 0
                           ? 'Отображаются пары всех подгрупп'
                           : 'Общие пары + пары $_subgroup подгруппы. '
-                            'Пары другой подгруппы видны в фоне.',
+                              'Пары другой подгруппы видны в фоне.',
                       style: TextStyle(fontSize: 12, color: Colors.grey[600]),
                     ),
                   ],
                 ),
               ),
             ),
-
             const SizedBox(height: 16),
-            _SectionHeader(title: 'Данные'),
+            const _SectionHeader(title: 'Данные'),
             _SettingCard(
               icon: Icons.delete_outline,
               title: 'Очистить кэш',
@@ -164,10 +174,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
       context: context,
       builder: (_) => AlertDialog(
         title: const Text('Очистить кэш?'),
-        content: const Text('Сохранённые расписания и история изменений будут удалены.'),
+        content: const Text(
+            'Сохранённые расписания и история изменений будут удалены.'),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Отмена')),
-          TextButton(onPressed: () => Navigator.pop(context, true),  child: const Text('Очистить')),
+          TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('Отмена')),
+          TextButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('Очистить')),
         ],
       ),
     );
@@ -175,8 +190,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
       final svc = ScheduleService();
       await svc.clearChanges(_group!.id);
       // Кэш истории и бейзлайна — можно очистить вручную через prefs.clear()
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Кэш очищен')));
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(const SnackBar(content: Text('Кэш очищен')));
+      }
     }
   }
 }
@@ -190,8 +207,11 @@ class _SectionHeader extends StatelessWidget {
     return Padding(
       padding: const EdgeInsets.only(left: 4, bottom: 8),
       child: Text(title.toUpperCase(),
-          style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold,
-              color: Colors.grey[500], letterSpacing: 1)),
+          style: TextStyle(
+              fontSize: 11,
+              fontWeight: FontWeight.bold,
+              color: Colors.grey[500],
+              letterSpacing: 1)),
     );
   }
 }
@@ -204,8 +224,11 @@ class _SettingCard extends StatelessWidget {
   final Color? color;
 
   const _SettingCard({
-    required this.icon, required this.title,
-    required this.subtitle, required this.onTap, this.color,
+    required this.icon,
+    required this.title,
+    required this.subtitle,
+    required this.onTap,
+    this.color,
   });
 
   @override
@@ -215,13 +238,16 @@ class _SettingCard extends StatelessWidget {
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
       child: ListTile(
         leading: Container(
-          width: 36, height: 36,
+          width: 36,
+          height: 36,
           decoration: BoxDecoration(
-            color: c.withOpacity(0.1), borderRadius: BorderRadius.circular(8)),
+              color: c.withOpacity(0.1),
+              borderRadius: BorderRadius.circular(8)),
           child: Icon(icon, color: c, size: 20),
         ),
         title: Text(title),
-        subtitle: Text(subtitle, style: TextStyle(fontSize: 12, color: Colors.grey[600])),
+        subtitle: Text(subtitle,
+            style: TextStyle(fontSize: 12, color: Colors.grey[600])),
         trailing: const Icon(Icons.chevron_right, color: Colors.grey),
         onTap: onTap,
       ),

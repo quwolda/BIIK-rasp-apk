@@ -5,6 +5,7 @@
 import 'package:flutter/material.dart';
 import '../models/models.dart';
 import '../services/schedule_service.dart';
+import '../services/notification_service.dart';
 import '../widgets/lesson_card.dart';
 import '../widgets/day_header.dart';
 import 'changes_screen.dart';
@@ -23,14 +24,15 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
 
   Group? _group;
   int _subgroup = 1;
-  List<Lesson> _lessons = [];
-  List<ScheduleSnapshot> _history = [];
+  List<Lesson> _lessons = []; // текущее расписание (текущая неделя)
+  List<ScheduleSnapshot> _weekHistory = []; // история по неделям
   int _changeCount = 0;
 
   bool _loading = false;
+  bool _homeToday = false;
   String _status = '';
 
-  ScheduleSnapshot? _viewingSnapshot;
+  ScheduleSnapshot? _viewingSnapshot; // просматриваемая неделя из истории
 
   @override
   void initState() {
@@ -43,6 +45,7 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
   Future<void> _init() async {
     _group = await _svc.getSelectedGroup();
     _subgroup = await _svc.getSubgroup();
+    _homeToday = await NotificationService.isHomeTodayEnabled();
 
     if (_group == null) {
       if (mounted) {
@@ -61,23 +64,25 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
     if (_group != null) {
       await _loadCached();
       await _refresh(silent: true);
+      await NotificationService.requestPermission();
     } else {
       setState(() => _status = '');
     }
   }
 
-  // ── Загрузка кэша ─────────────────────────────────────────────────────────
+  // ── Загрузка кэша текущей недели ──────────────────────────────────────────
 
   Future<void> _loadCached() async {
     if (_group == null) return;
-    final baseline = await _svc.loadTodaysBaseline(_group!.id);
-    final history = await _svc.loadHistory(_group!.id);
+    final wKey = _svc.weekKey(DateTime.now());
+    final snap = await _svc.loadWeekSnapshot(_group!.id, wKey);
+    final history = await _svc.loadWeekHistory(_group!.id);
     final changes = await _svc.loadChanges(_group!.id);
     setState(() {
-      _lessons = baseline?.lessons ?? [];
-      _history = history;
+      _lessons = snap?.lessons ?? [];
+      _weekHistory = history;
       _changeCount = changes.length;
-      _status = baseline != null ? 'Кэш от ${_fmtDt(baseline.fetchedAt)}' : '';
+      _status = snap != null ? 'Кэш от ${_fmtDt(snap.fetchedAt)}' : '';
       _viewingSnapshot = null;
     });
   }
@@ -92,43 +97,47 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
     });
 
     try {
-      final fresh = await _svc.fetchSchedule(_group!.url);
-      final freshSnap = ScheduleSnapshot(
-        groupId: _group!.id,
-        fetchedAt: DateTime.now(),
-        lessons: fresh,
-      );
+      final result = await _svc.refreshSchedule(_group!.id, _group!.url);
 
-      // Базовая линия — только первый раз за день
-      final savedNew =
-          await _svc.saveTodaysBaselineIfAbsent(_group!.id, freshSnap);
-
-      // Изменения — только если базовая линия уже была
-      if (!savedNew) {
-        final baseline = await _svc.loadTodaysBaseline(_group!.id);
-        if (baseline != null) {
-          final changes = _svc.detectChanges(baseline.lessons, fresh);
-          if (changes.isNotEmpty) await _svc.saveChanges(_group!.id, changes);
-        }
+      // Сохраняем изменения если есть
+      if (result.changes.isNotEmpty) {
+        await _svc.saveChanges(_group!.id, result.changes);
       }
 
-      await _svc.addToHistory(_group!.id, freshSnap);
-
       final allChanges = await _svc.loadChanges(_group!.id);
-      final history = await _svc.loadHistory(_group!.id);
+      final history = await _svc.loadWeekHistory(_group!.id);
 
       setState(() {
-        _lessons = fresh;
-        _history = history;
+        _lessons = result.lessons;
+        _weekHistory = history;
         _changeCount = allChanges.length;
         _viewingSnapshot = null;
         _status = 'Обновлено: ${_fmtDt(DateTime.now())}';
       });
+
+      if (!_homeToday) {
+        await NotificationService.scheduleAll(result.lessons, _subgroup);
+      }
     } catch (e) {
       setState(() => _status = 'Ошибка: $e');
     } finally {
       setState(() => _loading = false);
     }
+  }
+
+  // ── "Сегодня дома" ────────────────────────────────────────────────────────
+
+  Future<void> _toggleHomeToday() async {
+    final newVal = !_homeToday;
+    await NotificationService.setHomeToday(newVal);
+    setState(() => _homeToday = newVal);
+
+    if (!newVal && _lessons.isNotEmpty) {
+      await NotificationService.scheduleAll(_lessons, _subgroup);
+    }
+
+    _showSnack(
+        newVal ? 'Уведомления на сегодня отключены' : 'Уведомления включены');
   }
 
   // ── Вспомогательные ───────────────────────────────────────────────────────
@@ -188,6 +197,11 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
         ],
       ),
       actions: [
+        IconButton(
+          icon: Icon(_homeToday ? Icons.home : Icons.home_outlined),
+          tooltip: _homeToday ? 'Уведомления отключены' : 'Сегодня дома',
+          onPressed: _toggleHomeToday,
+        ),
         if (_changeCount > 0)
           Stack(
             alignment: Alignment.topRight,
@@ -240,6 +254,14 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
           const SizedBox(width: 8),
           _sgChip('2 п/г', 2),
           const Spacer(),
+          if (_homeToday)
+            const Row(children: [
+              Icon(Icons.notifications_off, size: 12, color: Colors.white54),
+              SizedBox(width: 4),
+              Text('Дома',
+                  style: TextStyle(color: Colors.white54, fontSize: 11)),
+              SizedBox(width: 8),
+            ]),
           Text(_status,
               style: const TextStyle(color: Colors.white60, fontSize: 11)),
         ],
@@ -253,6 +275,9 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
       onTap: () async {
         await _svc.setSubgroup(val);
         setState(() => _subgroup = val);
+        if (!_homeToday && _lessons.isNotEmpty) {
+          await NotificationService.scheduleAll(_lessons, val);
+        }
       },
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 150),
@@ -294,24 +319,22 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
     return CustomScrollView(
       physics: const ClampingScrollPhysics(),
       slivers: [
-        // История снимков
-        if (_history.isNotEmpty)
-          SliverToBoxAdapter(child: _buildHistoryChips()),
+        // Чипы истории недель
+        if (_weekHistory.length > 1)
+          SliverToBoxAdapter(child: _buildWeekHistoryChips()),
 
-        // Кнопка «вернуться к текущему»
         if (_viewingSnapshot != null)
           SliverToBoxAdapter(
             child: Padding(
               padding: const EdgeInsets.fromLTRB(12, 4, 12, 0),
               child: TextButton.icon(
                 icon: const Icon(Icons.arrow_back),
-                label: const Text('Вернуться к текущему'),
+                label: const Text('Вернуться к текущей неделе'),
                 onPressed: () => setState(() => _viewingSnapshot = null),
               ),
             ),
           ),
 
-        // Расписание
         SliverList(
           delegate: SliverChildBuilderDelegate(
             (ctx, i) {
@@ -334,21 +357,28 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
     );
   }
 
-  Widget _buildHistoryChips() {
+  /// Чипы с диапазонами недель (например "19.05 – 25.05")
+  Widget _buildWeekHistoryChips() {
     return SizedBox(
       height: 40,
       child: ListView.separated(
         scrollDirection: Axis.horizontal,
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-        itemCount: _history.length,
+        itemCount: _weekHistory.length,
         separatorBuilder: (_, __) => const SizedBox(width: 6),
         itemBuilder: (_, i) {
-          final snap = _history[_history.length - 1 - i];
-          final selected = _viewingSnapshot?.dateKey == snap.dateKey;
+          // Показываем от новых к старым
+          final snap = _weekHistory[_weekHistory.length - 1 - i];
+          final selected = _viewingSnapshot != null &&
+              _viewingSnapshot!.weekLabel == snap.weekLabel;
+          final isCurrent = i == 0; // самый первый = текущая неделя
+
           return FilterChip(
-            label: Text(snap.weekLabel,
-                style: TextStyle(
-                    fontSize: 11, color: selected ? Colors.white : null)),
+            label: Text(
+              isCurrent ? '${snap.weekLabel} (тек.)' : snap.weekLabel,
+              style: TextStyle(
+                  fontSize: 11, color: selected ? Colors.white : null),
+            ),
             selected: selected,
             selectedColor: const Color(0xFF1565C0),
             onSelected: (_) => setState(() {
@@ -426,6 +456,21 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
             onTap: () {
               Navigator.pop(context);
               _openChanges();
+            },
+          ),
+          const Divider(),
+          ListTile(
+            leading: Icon(
+              _homeToday ? Icons.home : Icons.home_outlined,
+              color: _homeToday ? Colors.orange : null,
+            ),
+            title: Text(_homeToday ? 'Уведомления отключены' : 'Сегодня дома'),
+            subtitle: Text(_homeToday
+                ? 'Нажмите чтобы включить'
+                : 'Отключить уведомления на сегодня'),
+            onTap: () {
+              Navigator.pop(context);
+              _toggleHomeToday();
             },
           ),
           const Divider(),

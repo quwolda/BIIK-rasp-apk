@@ -51,41 +51,7 @@ class ScheduleService {
     return _parseHtml(html);
   }
 
-  // ── Архив ─────────────────────────────────────────────────────────────────
-  // URL архива строится как vgNN.htm где NN — id группы
-
-  Future<List<String>> fetchArchiveUrls(String groupId) async {
-    // Прямой URL архива группы
-    final directUrl = 'vg$groupId.htm';
-    try {
-      final html = await _get('$_base$directUrl');
-      // Парсим ссылки на конкретные недели внутри архива
-      final doc = htmlParser.parse(html);
-      final urls = <String>[];
-      for (final a in doc.querySelectorAll('a[href]')) {
-        final href = (a.attributes['href'] ?? '').trim();
-        // Ссылки вида vgNN_1.htm, vgNN_2.htm и т.д.
-        if (RegExp(r'^vg\d+.*\.htm$', caseSensitive: false).hasMatch(href)) {
-          urls.add(href);
-        }
-      }
-      // Если внутри нет подссылок — сам файл и есть архив
-      if (urls.isEmpty) urls.add(directUrl);
-      return urls.reversed.toList(); // новые первыми
-    } catch (_) {
-      return [];
-    }
-  }
-
-  Future<List<Lesson>> fetchArchiveSchedule(String archiveUrl) async {
-    final html = await _get('$_base$archiveUrl');
-    return _parseHtml(html);
-  }
-
   // ── Парсер ────────────────────────────────────────────────────────────────
-  // Структура таблицы:
-  // TR > TD(дата, rowspan) | TD(пара+время) | TD(colspan=2, вся группа)
-  //                                         | TD(colspan=1) TD(colspan=1) — подгруппы
 
   List<Lesson> _parseHtml(String html) {
     final doc = htmlParser.parse(html);
@@ -104,7 +70,6 @@ class ScheduleService {
 
         int ci = 0;
 
-        // Ячейка с датой (rowspan, содержит ДД.ММ.ГГГГ)
         final datePat = RegExp(r'\d{2}\.\d{2}\.\d{4}');
         final firstText = _clean(cells[0].text);
         if (datePat.hasMatch(firstText)) {
@@ -118,20 +83,17 @@ class ScheduleService {
 
         if (currentDate.isEmpty || cells.length <= ci) continue;
 
-        // Ячейка с номером пары и временем
         final pairText = _clean(cells[ci].text);
         final pairMatch = RegExp(r'(\d)\s*[Пп]ара').firstMatch(pairText);
         final isNumOnly = RegExp(r'^\d$').hasMatch(pairText);
         if (pairMatch == null && !isNumOnly) continue;
 
-        // Пустые пары (class=nul)
         final isEmptyRow = row.querySelectorAll('td.nul').isNotEmpty ||
             cells.any((c) => (c.attributes['class'] ?? '').contains('nul'));
         if (isEmptyRow) continue;
 
         final pairNum = pairMatch?.group(1) ?? pairText;
 
-        // Время из той же ячейки
         String time = '';
         final timeMatch = RegExp(r'(\d{2}[\.\:]\d{2})-(\d{2}[\.\:]\d{2})')
             .firstMatch(pairText);
@@ -142,7 +104,6 @@ class ScheduleService {
 
         if (cells.length <= ci) continue;
 
-        // Определяем подгруппы по colspan оставшихся ячеек
         final subjectCells = cells.sublist(ci);
         if (subjectCells.isEmpty) continue;
 
@@ -150,12 +111,10 @@ class ScheduleService {
             int.tryParse(subjectCells[0].attributes['colspan'] ?? '2') ?? 2;
 
         if (colspan0 == 2 || subjectCells.length == 1) {
-          // Вся группа (подгруппа 0)
           final lesson = _parseSubjectCell(
               subjectCells[0], currentDate, currentWeekday, pairNum, time, 0);
           if (lesson != null) lessons.add(lesson);
         } else {
-          // Две подгруппы рядом
           if (subjectCells.isNotEmpty) {
             final l1 = _parseSubjectCell(
                 subjectCells[0], currentDate, currentWeekday, pairNum, time, 1);
@@ -174,16 +133,13 @@ class ScheduleService {
 
   Lesson? _parseSubjectCell(dom.Element cell, String date, String weekday,
       String pairNum, String time, int subgroup) {
-    // Пропускаем пустые ячейки
     final text = _clean(cell.text);
     if (text.isEmpty || text == '\u00a0' || text == '&nbsp;') return null;
     if ((cell.attributes['class'] ?? '').contains('nul')) return null;
 
-    // Предмет — первая ссылка z1
     final subjectLink = cell.querySelector('a.z1');
     String subject = subjectLink != null ? _clean(subjectLink.text) : text;
 
-    // Тип занятия из скобок в названии: "(Лаб.)", "(Лек)", "(Практич.)"
     String type = '';
     final typeMatch = RegExp(r'\(([^)]+)\)').firstMatch(subject);
     if (typeMatch != null) {
@@ -191,11 +147,9 @@ class ScheduleService {
       subject = subject.substring(0, typeMatch.start).trim();
     }
 
-    // Аудитория — ссылка z2
     final roomLink = cell.querySelector('a.z2');
     final room = roomLink != null ? _clean(roomLink.text) : '';
 
-    // Преподаватель — ссылка z3
     final teacherLink = cell.querySelector('a.z3');
     final teacher = teacherLink != null ? _clean(teacherLink.text) : '';
 
@@ -216,19 +170,45 @@ class ScheduleService {
 
   String _clean(String s) => s.replaceAll(RegExp(r'\s+'), ' ').trim();
 
-  // ── SharedPreferences ─────────────────────────────────────────────────────
+  // ── Ключ недели ───────────────────────────────────────────────────────────
+  // Возвращает "YYYY-WNN" — ISO номер недели (Пн=начало)
 
-  Future<SharedPreferences> get _p => SharedPreferences.getInstance();
+  String weekKey(DateTime date) {
+    // ISO week: находим понедельник текущей недели
+    final monday = date.subtract(Duration(days: date.weekday - 1));
+    final y = monday.year;
+    final m = monday.month.toString().padLeft(2, '0');
+    final d = monday.day.toString().padLeft(2, '0');
+    // Используем дату понедельника как ключ для надёжности
+    return '$y-$m-$d';
+  }
 
   String _todayKey() {
     final n = DateTime.now();
     return '${n.year}-${n.month.toString().padLeft(2, '0')}-${n.day.toString().padLeft(2, '0')}';
   }
 
-  // ── Базовая линия дня (фиксируется один раз, не перезаписывается) ─────────
+  String _todayWeekKey() => weekKey(DateTime.now());
 
-  Future<ScheduleSnapshot?> loadTodaysBaseline(String groupId) async {
-    final raw = (await _p).getString('baseline_${groupId}_${_todayKey()}');
+  // ── Парсинг даты урока "DD.MM.YYYY" → DateTime ────────────────────────────
+
+  DateTime? _parseDate(String date) {
+    try {
+      final p = date.split('.');
+      if (p.length != 3) return null;
+      return DateTime(int.parse(p[2]), int.parse(p[1]), int.parse(p[0]));
+    } catch (_) {
+      return null;
+    }
+  }
+
+  // ── История по неделям ────────────────────────────────────────────────────
+
+  /// Загружает снимок конкретной недели (ключ = "YYYY-MM-DD" понедельника)
+  Future<ScheduleSnapshot?> loadWeekSnapshot(
+      String groupId, String wKey) async {
+    final raw = (await SharedPreferences.getInstance())
+        .getString('week_${groupId}_$wKey');
     if (raw == null) return null;
     try {
       return ScheduleSnapshot.fromJson(jsonDecode(raw));
@@ -237,52 +217,148 @@ class ScheduleService {
     }
   }
 
-  /// Сохраняет базовую линию ТОЛЬКО если её ещё нет на сегодня
+  /// Сохраняет снимок недели. Перезаписывает если уже есть (обновление).
+  Future<void> saveWeekSnapshot(
+      String groupId, String wKey, ScheduleSnapshot snap) async {
+    await (await SharedPreferences.getInstance())
+        .setString('week_${groupId}_$wKey', jsonEncode(snap.toJson()));
+    // Обновляем список ключей недель
+    await _addWeekKey(groupId, wKey);
+  }
+
+  Future<void> _addWeekKey(String groupId, String wKey) async {
+    final prefs = await SharedPreferences.getInstance();
+    final key = 'week_keys_$groupId';
+    final keys = prefs.getStringList(key) ?? [];
+    if (!keys.contains(wKey)) {
+      keys.add(wKey);
+      keys.sort();
+      // Храним максимум 12 недель
+      final trimmed = keys.length > 12 ? keys.sublist(keys.length - 12) : keys;
+      await prefs.setStringList(key, trimmed);
+    }
+  }
+
+  /// Возвращает все сохранённые снимки недель, отсортированные по дате
+  Future<List<ScheduleSnapshot>> loadWeekHistory(String groupId) async {
+    final prefs = await SharedPreferences.getInstance();
+    final keys = prefs.getStringList('week_keys_$groupId') ?? [];
+    final result = <ScheduleSnapshot>[];
+    for (final wKey in keys) {
+      final snap = await loadWeekSnapshot(groupId, wKey);
+      if (snap != null) result.add(snap);
+    }
+    return result;
+  }
+
+  // ── Защита сегодняшнего дня ───────────────────────────────────────────────
+  // Если на сайте сегодняшний день уже исчез — берём его из кэша текущей недели
+
+  List<Lesson> mergeWithTodayProtection(
+      List<Lesson> fresh, List<Lesson> cached) {
+    final today = _todayKey();
+
+    // Есть ли сегодня в свежих данных
+    final todayInFresh =
+        fresh.any((l) => l.date == _lessonDateKey(l.date, today));
+    if (todayInFresh) return fresh; // всё хорошо, сайт ещё показывает сегодня
+
+    // Сегодня исчез с сайта — берём из кэша
+    final todayLessons = cached.where((l) {
+      final d = _parseDate(l.date);
+      if (d == null) return false;
+      final dk =
+          '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
+      return dk == today;
+    }).toList();
+
+    if (todayLessons.isEmpty) return fresh;
+
+    // Объединяем: свежие данные + сегодняшний день из кэша
+    final merged = [...fresh, ...todayLessons];
+    // Сортируем по дате и паре
+    merged.sort((a, b) {
+      final da = _parseDate(a.date);
+      final db = _parseDate(b.date);
+      if (da == null || db == null) return 0;
+      final dateCmp = da.compareTo(db);
+      if (dateCmp != 0) return dateCmp;
+      return a.pairNum.compareTo(b.pairNum);
+    });
+    return merged;
+  }
+
+  String _lessonDateKey(String lessonDate, String todayKey) {
+    final d = _parseDate(lessonDate);
+    if (d == null) return '';
+    return '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
+  }
+
+  // ── Главный метод обновления ───────────────────────────────────────────────
+  // Возвращает итоговый список уроков для отображения
+
+  Future<RefreshResult> refreshSchedule(String groupId, String groupUrl) async {
+    final fresh = await fetchSchedule(groupUrl);
+    final wKey = _todayWeekKey();
+
+    // Загружаем текущий кэш недели
+    final cached = await loadWeekSnapshot(groupId, wKey);
+    final cachedLessons = cached?.lessons ?? [];
+
+    // Защищаем сегодняшний день
+    final merged = mergeWithTodayProtection(fresh, cachedLessons);
+
+    // Создаём новый снимок
+    final newSnap = ScheduleSnapshot(
+      groupId: groupId,
+      fetchedAt: DateTime.now(),
+      lessons: merged,
+    );
+
+    // Детектируем изменения относительно кэша
+    List<LessonChange> changes = [];
+    if (cachedLessons.isNotEmpty) {
+      changes = detectChanges(cachedLessons, merged);
+    }
+
+    // Сохраняем снимок недели (перезапись — всегда актуальные данные)
+    await saveWeekSnapshot(groupId, wKey, newSnap);
+
+    return RefreshResult(
+      lessons: merged,
+      changes: changes,
+      weekKey: wKey,
+    );
+  }
+
+  // ── Базовая линия дня (для детектирования изменений внутри дня) ───────────
+
+  Future<ScheduleSnapshot?> loadTodaysBaseline(String groupId) async {
+    final raw = (await SharedPreferences.getInstance())
+        .getString('baseline_${groupId}_${_todayKey()}');
+    if (raw == null) return null;
+    try {
+      return ScheduleSnapshot.fromJson(jsonDecode(raw));
+    } catch (_) {
+      return null;
+    }
+  }
+
   Future<bool> saveTodaysBaselineIfAbsent(
       String groupId, ScheduleSnapshot snap) async {
-    final prefs = await _p;
+    final prefs = await SharedPreferences.getInstance();
     final key = 'baseline_${groupId}_${_todayKey()}';
-    if (prefs.containsKey(key)) return false; // уже есть — не перезаписываем
+    if (prefs.containsKey(key)) return false;
     await prefs.setString(key, jsonEncode(snap.toJson()));
     return true;
   }
 
-  // ── История снимков ───────────────────────────────────────────────────────
-
-  Future<List<ScheduleSnapshot>> loadHistory(String groupId) async {
-    final raw = (await _p).getStringList('history_$groupId') ?? [];
-    return raw
-        .map((s) {
-          try {
-            return ScheduleSnapshot.fromJson(jsonDecode(s));
-          } catch (_) {
-            return null;
-          }
-        })
-        .whereType<ScheduleSnapshot>()
-        .toList();
-  }
-
-  Future<void> addToHistory(String groupId, ScheduleSnapshot snap) async {
-    final prefs = await _p;
-    final history = await loadHistory(groupId);
-    if (history.any((h) => h.dateKey == snap.dateKey)) return; // дубликат
-    history.add(snap);
-    final trimmed =
-        history.length > 60 ? history.sublist(history.length - 60) : history;
-    await prefs.setStringList(
-      'history_$groupId',
-      trimmed.map((s) => jsonEncode(s.toJson())).toList(),
-    );
-  }
-
-  // ── Изменения — без дубликатов ────────────────────────────────────────────
+  // ── Изменения ─────────────────────────────────────────────────────────────
 
   List<LessonChange> detectChanges(List<Lesson> baseline, List<Lesson> fresh) {
     final changes = <LessonChange>[];
     final now = DateTime.now();
 
-    // Ключ: дата + пара + подгруппа + предмет (чтобы не дублировать)
     String lessonSig(Lesson l) => '${l.date}-${l.pairNum}-${l.subgroup}';
 
     final baseMap = <String, Lesson>{};
@@ -295,6 +371,13 @@ class ScheduleService {
       final base = baseMap[key]!;
       final f = freshMap[key];
       if (f == null) {
+        // Не добавляем "removed" для сегодняшнего дня — он защищён
+        final d = _parseDate(base.date);
+        if (d != null) {
+          final dk =
+              '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
+          if (dk == _todayKey()) continue; // сегодня не удаляем
+        }
         changes.add(LessonChange(
           date: base.date,
           pairNum: base.pairNum,
@@ -346,7 +429,9 @@ class ScheduleService {
   }
 
   Future<List<LessonChange>> loadChanges(String groupId) async {
-    final raw = (await _p).getStringList('changes_$groupId') ?? [];
+    final raw = (await SharedPreferences.getInstance())
+            .getStringList('changes_$groupId') ??
+        [];
     return raw
         .map((s) {
           try {
@@ -359,14 +444,12 @@ class ScheduleService {
         .toList();
   }
 
-  /// Сохраняет только новые изменения которых ещё нет в истории
   Future<void> saveChanges(
       String groupId, List<LessonChange> newChanges) async {
     if (newChanges.isEmpty) return;
-    final prefs = await _p;
+    final prefs = await SharedPreferences.getInstance();
     final existing = await loadChanges(groupId);
 
-    // Дедупликация по дата+пара+поле+старое значение
     String changeSig(LessonChange c) =>
         '${c.date}-${c.pairNum}-${c.field}-${c.oldValue}';
     final existingSigs = existing.map(changeSig).toSet();
@@ -383,12 +466,13 @@ class ScheduleService {
   }
 
   Future<void> clearChanges(String groupId) async =>
-      (await _p).remove('changes_$groupId');
+      (await SharedPreferences.getInstance()).remove('changes_$groupId');
 
   // ── Настройки ─────────────────────────────────────────────────────────────
 
   Future<Group?> getSelectedGroup() async {
-    final raw = (await _p).getString('selected_group');
+    final raw =
+        (await SharedPreferences.getInstance()).getString('selected_group');
     if (raw == null) return null;
     try {
       return Group.fromJson(jsonDecode(raw));
@@ -398,16 +482,21 @@ class ScheduleService {
   }
 
   Future<void> setSelectedGroup(Group g) async =>
-      (await _p).setString('selected_group', jsonEncode(g.toJson()));
+      (await SharedPreferences.getInstance())
+          .setString('selected_group', jsonEncode(g.toJson()));
 
-  Future<int> getSubgroup() async => (await _p).getInt('subgroup') ?? 1;
+  Future<int> getSubgroup() async =>
+      (await SharedPreferences.getInstance()).getInt('subgroup') ?? 1;
 
-  Future<void> setSubgroup(int v) async => (await _p).setInt('subgroup', v);
+  Future<void> setSubgroup(int v) async =>
+      (await SharedPreferences.getInstance()).setInt('subgroup', v);
 
   // ── Избранное ─────────────────────────────────────────────────────────────
 
   Future<List<Group>> getFavorites() async {
-    final raw = (await _p).getStringList('favorites') ?? [];
+    final raw =
+        (await SharedPreferences.getInstance()).getStringList('favorites') ??
+            [];
     return raw
         .map((s) {
           try {
@@ -421,7 +510,7 @@ class ScheduleService {
   }
 
   Future<void> addFavorite(Group g) async {
-    final prefs = await _p;
+    final prefs = await SharedPreferences.getInstance();
     final favs = await getFavorites();
     if (favs.any((f) => f.id == g.id)) return;
     favs.add(g);
@@ -430,7 +519,7 @@ class ScheduleService {
   }
 
   Future<void> removeFavorite(Group g) async {
-    final prefs = await _p;
+    final prefs = await SharedPreferences.getInstance();
     final favs = await getFavorites();
     favs.removeWhere((f) => f.id == g.id);
     await prefs.setStringList(
@@ -440,7 +529,9 @@ class ScheduleService {
   // ── Кэш групп ─────────────────────────────────────────────────────────────
 
   Future<List<Group>> getCachedGroups() async {
-    final raw = (await _p).getStringList('cached_groups') ?? [];
+    final raw = (await SharedPreferences.getInstance())
+            .getStringList('cached_groups') ??
+        [];
     return raw
         .map((s) {
           try {
@@ -454,8 +545,22 @@ class ScheduleService {
   }
 
   Future<void> cacheGroups(List<Group> groups) async =>
-      (await _p).setStringList(
+      (await SharedPreferences.getInstance()).setStringList(
         'cached_groups',
         groups.map((g) => jsonEncode(g.toJson())).toList(),
       );
+}
+
+// ── Результат обновления ──────────────────────────────────────────────────────
+
+class RefreshResult {
+  final List<Lesson> lessons;
+  final List<LessonChange> changes;
+  final String weekKey;
+
+  const RefreshResult({
+    required this.lessons,
+    required this.changes,
+    required this.weekKey,
+  });
 }
