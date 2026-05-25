@@ -3,9 +3,9 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 class Group {
-  final String id; // числовой ID из URL (e.g. "82")
-  final String name; // отображаемое имя (e.g. "ЦС-82")
-  final String url; // файл (e.g. "cg82.htm")
+  final String id;
+  final String name;
+  final String url;
 
   const Group({required this.id, required this.name, required this.url});
 
@@ -31,10 +31,10 @@ class Lesson {
   final String weekday; // "Ср-1"
   final String pairNum; // "1"
   final String time; // "08.30-10.00"
-  final String subject; // "ПиТПМ"
-  final String type; // "Лаб." / "Лек" / ""
-  final String room; // "110"
-  final String teacher; // "Семёнов В.А."
+  final String subject;
+  final String type;
+  final String room;
+  final String teacher;
   final int subgroup; // 0=все, 1=первая, 2=вторая
 
   const Lesson({
@@ -49,12 +49,21 @@ class Lesson {
     this.subgroup = 0,
   });
 
-  /// Ключ для сравнения (детектирование изменений)
   String get key => '$date-$pairNum-$subgroup';
 
-  /// Подходит ли пара для указанной подгруппы
   bool matches(int userSubgroup) =>
       userSubgroup == 0 || subgroup == 0 || subgroup == userSubgroup;
+
+  /// Парсит дату "DD.MM.YYYY" в DateTime для сортировки
+  DateTime? get parsedDate {
+    try {
+      final p = date.split('.');
+      if (p.length != 3) return null;
+      return DateTime(int.parse(p[2]), int.parse(p[1]), int.parse(p[0]));
+    } catch (_) {
+      return null;
+    }
+  }
 
   Map<String, dynamic> toJson() => {
         'date': date,
@@ -94,17 +103,25 @@ class ScheduleSnapshot {
     required this.lessons,
   });
 
-  /// Ключ дня  "2026-05-20"
   String get dateKey {
     final d = fetchedAt;
     return '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
   }
 
-  /// Диапазон дат из самого расписания
+  /// Диапазон дат недели, отсортированный правильно: "19.05 – 25.05"
   String get weekLabel {
     if (lessons.isEmpty) return 'Нет данных';
-    final dates = lessons.map((l) => l.date).toSet().toList()..sort();
-    return dates.length == 1 ? dates.first : '${dates.first} – ${dates.last}';
+    final parsed =
+        lessons.map((l) => l.parsedDate).whereType<DateTime>().toList();
+    if (parsed.isEmpty) return 'Нет данных';
+    parsed.sort((a, b) => a.compareTo(b));
+    final first = parsed.first;
+    final last = parsed.last;
+
+    String fmt(DateTime d) =>
+        '${d.day.toString().padLeft(2, '0')}.${d.month.toString().padLeft(2, '0')}';
+
+    return first == last ? fmt(first) : '${fmt(first)} – ${fmt(last)}';
   }
 
   Map<String, dynamic> toJson() => {
@@ -127,9 +144,8 @@ class ScheduleSnapshot {
 class LessonChange {
   final String date;
   final String pairNum;
-  final String subject; // для контекста
-  final String
-      field; // 'added' | 'removed' | 'subject' | 'room' | 'teacher' | 'time' | 'type'
+  final String subject;
+  final String field;
   final String oldValue;
   final String newValue;
   final DateTime detectedAt;

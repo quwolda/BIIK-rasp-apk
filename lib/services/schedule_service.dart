@@ -171,15 +171,13 @@ class ScheduleService {
   String _clean(String s) => s.replaceAll(RegExp(r'\s+'), ' ').trim();
 
   // ── Ключ недели ───────────────────────────────────────────────────────────
-  // Возвращает "YYYY-WNN" — ISO номер недели (Пн=начало)
+  // "YYYY-MM-DD" понедельника текущей недели
 
   String weekKey(DateTime date) {
-    // ISO week: находим понедельник текущей недели
     final monday = date.subtract(Duration(days: date.weekday - 1));
     final y = monday.year;
     final m = monday.month.toString().padLeft(2, '0');
     final d = monday.day.toString().padLeft(2, '0');
-    // Используем дату понедельника как ключ для надёжности
     return '$y-$m-$d';
   }
 
@@ -190,125 +188,94 @@ class ScheduleService {
 
   String _todayWeekKey() => weekKey(DateTime.now());
 
-  // ── Парсинг даты урока "DD.MM.YYYY" → DateTime ────────────────────────────
+  // ── Парсинг даты урока "DD.MM.YYYY" → строка "YYYY-MM-DD" ────────────────
 
-  DateTime? _parseDate(String date) {
+  String? _lessonDateKey(String lessonDate) {
     try {
-      final p = date.split('.');
+      final p = lessonDate.split('.');
       if (p.length != 3) return null;
-      return DateTime(int.parse(p[2]), int.parse(p[1]), int.parse(p[0]));
+      return '${p[2]}-${p[1]}-${p[0]}';
     } catch (_) {
       return null;
     }
-  }
-
-  // ── История по неделям ────────────────────────────────────────────────────
-
-  /// Загружает снимок конкретной недели (ключ = "YYYY-MM-DD" понедельника)
-  Future<ScheduleSnapshot?> loadWeekSnapshot(
-      String groupId, String wKey) async {
-    final raw = (await SharedPreferences.getInstance())
-        .getString('week_${groupId}_$wKey');
-    if (raw == null) return null;
-    try {
-      return ScheduleSnapshot.fromJson(jsonDecode(raw));
-    } catch (_) {
-      return null;
-    }
-  }
-
-  /// Сохраняет снимок недели. Перезаписывает если уже есть (обновление).
-  Future<void> saveWeekSnapshot(
-      String groupId, String wKey, ScheduleSnapshot snap) async {
-    await (await SharedPreferences.getInstance())
-        .setString('week_${groupId}_$wKey', jsonEncode(snap.toJson()));
-    // Обновляем список ключей недель
-    await _addWeekKey(groupId, wKey);
-  }
-
-  Future<void> _addWeekKey(String groupId, String wKey) async {
-    final prefs = await SharedPreferences.getInstance();
-    final key = 'week_keys_$groupId';
-    final keys = prefs.getStringList(key) ?? [];
-    if (!keys.contains(wKey)) {
-      keys.add(wKey);
-      keys.sort();
-      // Храним максимум 12 недель
-      final trimmed = keys.length > 12 ? keys.sublist(keys.length - 12) : keys;
-      await prefs.setStringList(key, trimmed);
-    }
-  }
-
-  /// Возвращает все сохранённые снимки недель, отсортированные по дате
-  Future<List<ScheduleSnapshot>> loadWeekHistory(String groupId) async {
-    final prefs = await SharedPreferences.getInstance();
-    final keys = prefs.getStringList('week_keys_$groupId') ?? [];
-    final result = <ScheduleSnapshot>[];
-    for (final wKey in keys) {
-      final snap = await loadWeekSnapshot(groupId, wKey);
-      if (snap != null) result.add(snap);
-    }
-    return result;
   }
 
   // ── Защита сегодняшнего дня ───────────────────────────────────────────────
-  // Если на сайте сегодняшний день уже исчез — берём его из кэша текущей недели
+  // Если сегодняшний день исчез с сайта — подставляем из кэша.
+  // Дедупликация по ключу date+pairNum+subgroup.
 
   List<Lesson> mergeWithTodayProtection(
       List<Lesson> fresh, List<Lesson> cached) {
     final today = _todayKey();
 
     // Есть ли сегодня в свежих данных
-    final todayInFresh =
-        fresh.any((l) => l.date == _lessonDateKey(l.date, today));
-    if (todayInFresh) return fresh; // всё хорошо, сайт ещё показывает сегодня
+    final todayInFresh = fresh.any((l) => _lessonDateKey(l.date) == today);
+    if (todayInFresh) {
+      // Сегодня есть — дедуплицируем весь список по ключу
+      return _deduplicate(fresh);
+    }
 
     // Сегодня исчез с сайта — берём из кэша
-    final todayLessons = cached.where((l) {
-      final d = _parseDate(l.date);
-      if (d == null) return false;
-      final dk =
-          '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
-      return dk == today;
-    }).toList();
+    final todayLessons =
+        cached.where((l) => _lessonDateKey(l.date) == today).toList();
 
-    if (todayLessons.isEmpty) return fresh;
+    if (todayLessons.isEmpty) return _deduplicate(fresh);
 
-    // Объединяем: свежие данные + сегодняшний день из кэша
+    // Объединяем и дедуплицируем
     final merged = [...fresh, ...todayLessons];
-    // Сортируем по дате и паре
-    merged.sort((a, b) {
-      final da = _parseDate(a.date);
-      final db = _parseDate(b.date);
-      if (da == null || db == null) return 0;
-      final dateCmp = da.compareTo(db);
-      if (dateCmp != 0) return dateCmp;
-      return a.pairNum.compareTo(b.pairNum);
-    });
-    return merged;
+    return _deduplicate(merged);
   }
 
-  String _lessonDateKey(String lessonDate, String todayKey) {
-    final d = _parseDate(lessonDate);
-    if (d == null) return '';
-    return '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
+  /// Убирает дубликаты по ключу date+pairNum+subgroup, сохраняет порядок по дате
+  List<Lesson> _deduplicate(List<Lesson> lessons) {
+    final seen = <String>{};
+    final result = <Lesson>[];
+    for (final l in lessons) {
+      final key = '${l.date}-${l.pairNum}-${l.subgroup}';
+      if (seen.add(key)) result.add(l);
+    }
+    // Сортируем по дате → по паре
+    result.sort((a, b) {
+      final da = a.parsedDate;
+      final db = b.parsedDate;
+      if (da == null || db == null) return 0;
+      final cmp = da.compareTo(db);
+      if (cmp != 0) return cmp;
+      return a.pairNum.compareTo(b.pairNum);
+    });
+    return result;
   }
 
   // ── Главный метод обновления ───────────────────────────────────────────────
-  // Возвращает итоговый список уроков для отображения
+
+  /// Возвращает только уроки принадлежащие указанной неделе (по ключу понедельника)
+  List<Lesson> _filterByWeek(List<Lesson> lessons, String wKey) {
+    // wKey = "YYYY-MM-DD" понедельника
+    final monday = DateTime.parse(wKey);
+    final sunday = monday.add(const Duration(days: 6));
+    return lessons.where((l) {
+      final d = l.parsedDate;
+      if (d == null) return false;
+      // Сравниваем только дату без времени
+      final day = DateTime(d.year, d.month, d.day);
+      return !day.isBefore(monday) && !day.isAfter(sunday);
+    }).toList();
+  }
 
   Future<RefreshResult> refreshSchedule(String groupId, String groupUrl) async {
-    final fresh = await fetchSchedule(groupUrl);
+    final allFresh = await fetchSchedule(groupUrl);
     final wKey = _todayWeekKey();
 
-    // Загружаем текущий кэш недели
+    // Оставляем только уроки текущей недели
+    final fresh = _filterByWeek(allFresh, wKey);
+
+    // Загружаем кэш текущей недели
     final cached = await loadWeekSnapshot(groupId, wKey);
     final cachedLessons = cached?.lessons ?? [];
 
-    // Защищаем сегодняшний день
+    // Защищаем сегодня + дедуплицируем
     final merged = mergeWithTodayProtection(fresh, cachedLessons);
 
-    // Создаём новый снимок
     final newSnap = ScheduleSnapshot(
       groupId: groupId,
       fetchedAt: DateTime.now(),
@@ -321,7 +288,7 @@ class ScheduleService {
       changes = detectChanges(cachedLessons, merged);
     }
 
-    // Сохраняем снимок недели (перезапись — всегда актуальные данные)
+    // Сохраняем снимок недели
     await saveWeekSnapshot(groupId, wKey, newSnap);
 
     return RefreshResult(
@@ -331,7 +298,51 @@ class ScheduleService {
     );
   }
 
-  // ── Базовая линия дня (для детектирования изменений внутри дня) ───────────
+  // ── История по неделям ────────────────────────────────────────────────────
+
+  Future<ScheduleSnapshot?> loadWeekSnapshot(
+      String groupId, String wKey) async {
+    final raw = (await SharedPreferences.getInstance())
+        .getString('week_${groupId}_$wKey');
+    if (raw == null) return null;
+    try {
+      return ScheduleSnapshot.fromJson(jsonDecode(raw));
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<void> saveWeekSnapshot(
+      String groupId, String wKey, ScheduleSnapshot snap) async {
+    await (await SharedPreferences.getInstance())
+        .setString('week_${groupId}_$wKey', jsonEncode(snap.toJson()));
+    await _addWeekKey(groupId, wKey);
+  }
+
+  Future<void> _addWeekKey(String groupId, String wKey) async {
+    final prefs = await SharedPreferences.getInstance();
+    final key = 'week_keys_$groupId';
+    final keys = prefs.getStringList(key) ?? [];
+    if (!keys.contains(wKey)) {
+      keys.add(wKey);
+      keys.sort();
+      final trimmed = keys.length > 12 ? keys.sublist(keys.length - 12) : keys;
+      await prefs.setStringList(key, trimmed);
+    }
+  }
+
+  Future<List<ScheduleSnapshot>> loadWeekHistory(String groupId) async {
+    final prefs = await SharedPreferences.getInstance();
+    final keys = prefs.getStringList('week_keys_$groupId') ?? [];
+    final result = <ScheduleSnapshot>[];
+    for (final wKey in keys) {
+      final snap = await loadWeekSnapshot(groupId, wKey);
+      if (snap != null) result.add(snap);
+    }
+    return result;
+  }
+
+  // ── Базовая линия дня ─────────────────────────────────────────────────────
 
   Future<ScheduleSnapshot?> loadTodaysBaseline(String groupId) async {
     final raw = (await SharedPreferences.getInstance())
@@ -358,6 +369,7 @@ class ScheduleService {
   List<LessonChange> detectChanges(List<Lesson> baseline, List<Lesson> fresh) {
     final changes = <LessonChange>[];
     final now = DateTime.now();
+    final today = _todayKey();
 
     String lessonSig(Lesson l) => '${l.date}-${l.pairNum}-${l.subgroup}';
 
@@ -371,13 +383,8 @@ class ScheduleService {
       final base = baseMap[key]!;
       final f = freshMap[key];
       if (f == null) {
-        // Не добавляем "removed" для сегодняшнего дня — он защищён
-        final d = _parseDate(base.date);
-        if (d != null) {
-          final dk =
-              '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
-          if (dk == _todayKey()) continue; // сегодня не удаляем
-        }
+        // Не фиксируем удаление для сегодняшнего дня
+        if (_lessonDateKey(base.date) == today) continue;
         changes.add(LessonChange(
           date: base.date,
           pairNum: base.pairNum,
@@ -551,7 +558,7 @@ class ScheduleService {
       );
 }
 
-// ── Результат обновления ──────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
 
 class RefreshResult {
   final List<Lesson> lessons;
